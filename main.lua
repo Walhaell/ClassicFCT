@@ -180,6 +180,36 @@ local function ForeverReductionText(reductionType)
     return _G["COMBAT_TEXT_"..reductionType] or reductionType
 end
 
+-- Which slot carries the amount depends on the message type and it cannot be
+-- compared, so the first value that looks like a number is taken: a secret
+-- value, or a plain number where the client hands those out.
+local function ForeverAmount(data, arg3, arg4)
+    if (not IsNil(data)) and (IsSecret(data) or (type(data) == "number")) then return data end
+    if (not IsNil(arg3)) and (IsSecret(arg3) or (type(arg3) == "number")) then return arg3 end
+    if (not IsNil(arg4)) and (IsSecret(arg4) or (type(arg4) == "number")) then return arg4 end
+    return nil
+end
+
+-- /cfct trace: reports every event as it arrives. Amounts cannot be read, only
+-- located, so each payload value is described as nil, secret or plain.
+local foreverTrace = false
+local foreverTraceLeft = 0
+local FOREVER_TRACE_LIMIT = 100
+local function TraceEvent(messageType, data, arg3, arg4)
+    if (not foreverTrace) then return end
+    local function slot(v)
+        if (IsNil(v)) then return "nil" end
+        if (IsSecret(v)) then return "secret "..type(v) end
+        return "value "..type(v)
+    end
+    CFCT:Log("ct  "..tostring(messageType).." | data: "..slot(data).." | arg3: "..slot(arg3).." | arg4: "..slot(arg4))
+    foreverTraceLeft = foreverTraceLeft - 1
+    if (foreverTraceLeft <= 0) then
+        foreverTrace = false
+        CFCT:Log("ct  trace limit of "..FOREVER_TRACE_LIMIT.." events reached, tracing off")
+    end
+end
+
 -- WoW: Forever only: measured in place of the real text, whose width cannot be
 -- read (see InitFont). Five characters is a typical amount at this difficulty:
 -- "1,200" with separators, "-1.2K" abbreviated.
@@ -1113,7 +1143,11 @@ local FOREVER_REDUCTION_TYPE = {
 -- those arrive as a normal spell hit.
 local FOREVER_DAMAGE_TYPE = {
     DAMAGE = "auto", DAMAGE_CRIT = "auto", DAMAGE_SHIELD = "spell",
-    SPELL_DAMAGE = "spell", SPLIT_DAMAGE = "spell"
+    SPELL_DAMAGE = "spell", SPLIT_DAMAGE = "spell",
+    -- A spell crit is sometimes reported under its own type instead of
+    -- DAMAGE_CRIT. It is shown with the auto attack crit style, since the
+    -- spell crit category does not exist on this client.
+    SPELL_DAMAGE_CRIT = "auto"
 }
 local FOREVER_HEAL_TYPE = {
     HEAL = "heal", HEAL_CRIT = "heal", HEAL_ABSORB = "heal", HEAL_CRIT_ABSORB = "heal",
@@ -1125,6 +1159,14 @@ local function ForeverSetActiveUnit()
     if (type(C_CombatText.SetActiveUnit) == "function") then
         C_CombatText.SetActiveUnit(foreverUnit)
     end
+end
+
+-- What the client itself reports as the unit being watched. Used by the
+-- diagnostics only, never by the layout.
+local function ForeverActiveUnit()
+    if (type(C_CombatText.GetActiveUnit) ~= "function") then return "unknown" end
+    local ok, unit = pcall(C_CombatText.GetActiveUnit)
+    return ok and tostring(unit) or "unknown"
 end
 
 local function ForeverDispatch(event, text, textFmt, secretValue, periodic, crit, miss, count)
@@ -1140,15 +1182,17 @@ function f:COMBAT_TEXT_UPDATE(messageType)
     if (CFCT.enabled == false) then return end
     if (not messageType) then return end
     local data, arg3, arg4 = C_CombatText.GetCurrentEventInfo()
+    if (foreverTrace) then TraceEvent(messageType, data, arg3, arg4) end
     local isSpell = (strsub(messageType, 1, 6) == "SPELL_")
     local typeName = isSpell and strsub(messageType, 7) or messageType
 
     if (FOREVER_MISS_TYPE[typeName]) then
         ForeverDispatch(isSpell and "spell" or "auto", ForeverMissText(typeName), nil, nil, false, false, true)
     elseif (FOREVER_DAMAGE_TYPE[messageType]) then
-        if (IsNil(data)) then return end
-        local crit = (messageType == "DAMAGE_CRIT")
-        local text, textFmt, secretValue = ForeverText(data, "-")
+        local amount = ForeverAmount(data, arg3, arg4)
+        if (IsNil(amount)) then return end
+        local crit = (strfind(messageType, "_CRIT") ~= nil)
+        local text, textFmt, secretValue = ForeverText(amount, "-")
         ForeverDispatch(FOREVER_DAMAGE_TYPE[messageType], text, textFmt, secretValue, false, crit, false)
     elseif (FOREVER_HEAL_TYPE[messageType]) then
         if (IsNil(arg3)) then return end
@@ -1540,6 +1584,7 @@ local function ReportCapabilities()
         end
         probe:SetParent(nil)
         scratch:Hide()
+        table.insert(lines, "  active unit    : "..ForeverActiveUnit().." (asked for "..foreverUnit..")")
     end
     return table.concat(lines, "\n")
 end
@@ -1550,11 +1595,29 @@ SlashCmdList["CLASSICFCT"] = function(msg)
     cmd = strlower(cmd or "")
     if (cmd == "diag" or cmd == "") then
         CFCT:Log(ReportCapabilities())
+    elseif (cmd == "trace") then
+        if (not IsForever) then
+            CFCT:Log("Trace is a WoW: Forever command; other clients read the combat log instead.")
+            return
+        end
+        foreverTrace = not foreverTrace
+        foreverTraceLeft = FOREVER_TRACE_LIMIT
+        CFCT:Log("Combat text event trace "..(foreverTrace and ("on, up to "..FOREVER_TRACE_LIMIT.." events") or "off"))
+    elseif (cmd == "unit") then
+        if (not IsForever) then
+            CFCT:Log("The watched unit is a WoW: Forever setting; other clients follow the combat log.")
+            return
+        end
+        -- Diagnostics: the client only reports events of the unit being watched,
+        -- so this is what decides whose hits arrive.
+        if (rest ~= "") then foreverUnit = rest end
+        ForeverSetActiveUnit()
+        CFCT:Log("Watching unit "..ForeverActiveUnit()..". Try /cfct unit target to see what that reports.")
     elseif (cmd == "reload") then
         CFCT:Log("Reloading ClassicFCT...")
         C_Timer.After(1, function() ReloadUI() end)
     else
-        CFCT:Log("Commands: /cfct diag, /cfct reload")
+        CFCT:Log("Commands: /cfct diag, /cfct trace, /cfct unit <token>, /cfct reload")
     end
 end
 

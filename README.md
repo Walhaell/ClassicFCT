@@ -37,7 +37,13 @@ gets its own `ClassicFCT-Camelot.toc` and its own combat text reader:
 Keep Blizzard's *Combat > Enable floating combat text* setting **on**: it is the
 event source. The "Hide Blizzard Text" option only hides their text.
 
-`/cfct diag` prints what the running client reports.
+Diagnostics for that client:
+
+- `/cfct diag` prints what the running client reports.
+- `/cfct trace` prints every combat text event as it arrives, with the shape of
+  its data (an amount is reported as secret, since it cannot be read back).
+- `/cfct unit <token>` watches another unit than the player, to see which events
+  the client reports for it.
 
 
 Text display area can be positioned in 3 ways: 

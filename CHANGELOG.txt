@@ -2,7 +2,10 @@
     - Added support for WoW: Forever (new ClassicFCT-Camelot.toc, interface 16001)
     - Forever reads combat text from C_CombatText, since the combat log is closed to addons there
     - Forever lays out text it cannot measure with the width of a typical amount
+    - Forever looks for the amount in whichever event slot carries a number
+    - Forever shows spell criticals that arrive under their own event type
     - Added /cfct diag to report what the running client supports
+    - Added /cfct trace and /cfct unit for the Forever event source
 
 0.87u   Aug 16, 2024
     - Fixed miss filter, ColorPicker and Config panels for The War Within
