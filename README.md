@@ -18,7 +18,13 @@ gets its own `ClassicFCT-Camelot.toc` and its own combat text reader:
   `C_CombatText.GetCurrentEventInfo()`.
 - The amounts that event returns are secret values: they cannot be compared,
   added up or turned into keys, only handed to a client formatter. ClassicFCT
-  therefore converts every amount to a string before anything else touches it.
+  therefore converts every amount to a string before anything else touches it,
+  or passes the amount straight to the text if this build keeps it secret.
+- The width of a secret amount cannot be measured either, so on that client the
+  anti-overlap grid is laid out with the width of a five character sample
+  ("1,200", "-1.2K") instead of the real one. Text is never cut off and heights
+  are exact, but very long amounts can sit a little closer to their neighbour
+  than on the other clients, and the anti-overlap spacing sliders tune that.
 - Because of that, these options do nothing on that client and are hidden from
   the options panel: damage thresholds (absolute, relative, average), event
   merging, sorting by amount, spell ids (icons and the two spell id dropdowns),

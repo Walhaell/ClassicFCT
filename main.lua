@@ -165,14 +165,12 @@ local function ForeverText(value, prefix)
     return nil, prefix.."%s", value
 end
 
-local function InitFont(self, state)
-    local fontOptions = state.fontOptions
-    self:SetFont(fontOptions.fontPath, fontOptions.fontSize, fontOptions.fontStyle)
-    self:SetShadowOffset(fontOptions.fontSize/14, fontOptions.fontSize/14)
-    self:SetDrawLayer("OVERLAY")
-    self:SetJustifyH("CENTER")
-    self:SetJustifyV("MIDDLE")
-    -- self:SetPoint("BOTTOM", 0, 0)
+-- WoW: Forever only: measured in place of the real text, whose width cannot be
+-- read (see InitFont). Five characters is a typical amount at this difficulty:
+-- "1,200" with separators, "-1.2K" abbreviated.
+local SAMPLE_TEXT = "00000"
+
+local function SetFontText(self, state)
     if (state.textFmt and (state.secretValue ~= nil)) then
         -- WoW: Forever: the amount never became a plain string, so it is passed
         -- straight to the FontString, which is allowed to read secret values.
@@ -181,16 +179,51 @@ local function InitFont(self, state)
     else
         self:SetText(state.text)
     end
+end
+
+-- WoW: Forever only. Sets the sample text, measures it, and returns plain
+-- numbers, or the font size estimate if even that measurement is refused.
+local function MeasureSample(self, fontSize)
+    local ok, height, width = pcall(function()
+        self:SetText(SAMPLE_TEXT)
+        return self:GetStringHeight(), self:GetStringWidth()
+    end)
+    if (ok and (not IsSecret(height)) and (not IsSecret(width)) and (height > 0) and (width > 0)) then
+        return height, width
+    end
+    return fontSize * 1.5, fontSize * 4
+end
+
+local function InitFont(self, state)
+    local fontOptions = state.fontOptions
+    self:SetFont(fontOptions.fontPath, fontOptions.fontSize, fontOptions.fontStyle)
+    self:SetShadowOffset(fontOptions.fontSize/14, fontOptions.fontSize/14)
+    self:SetDrawLayer("OVERLAY")
+    self:SetJustifyH("CENTER")
+    self:SetJustifyV("MIDDLE")
+    -- self:SetPoint("BOTTOM", 0, 0)
+    if (IsForever) then
+        -- WoW: Forever: amounts arrive as secret values and the amount is handed
+        -- straight to the FontString, which is allowed to read them. Measuring
+        -- that text is not possible: any size the FontString derives from a secret
+        -- comes back secret too, and a secret number cannot be used in the layout
+        -- math. So a plain sample of the same font is measured instead, which gives
+        -- an exact height and the width of a typical amount.
+        state.strHeight, state.strWidth = MeasureSample(self, fontOptions.fontSize)
+        SetFontText(self, state)
+    else
+        SetFontText(self, state)
+        -- Measuring is a C side operation on text the FontString already holds.
+        -- If a client ever refused it the text still gets shown, it just overlaps.
+        local okHeight, height = pcall(self.GetStringHeight, self)
+        local okWidth, width = pcall(self.GetStringWidth, self)
+        state.strHeight = (okHeight and (type(height) == "number")) and height or (fontOptions.fontSize * 1.5)
+        state.strWidth = (okWidth and (type(width) == "number")) and width or (fontOptions.fontSize * 4)
+    end
     self:SetTextColor(unpack(fontOptions.fontColor))
     self:SetAlpha(fontOptions.fontAlpha)
     self:SetShadowColor(0,0,0,fontOptions.fontAlpha/2)
     state.initialTime = now
-    -- Measuring is a C side operation on text the FontString already holds.
-    -- If a client ever refused it the text still gets shown, it just overlaps.
-    local okHeight, height = pcall(self.GetStringHeight, self)
-    local okWidth, width = pcall(self.GetStringWidth, self)
-    state.strHeight = (okHeight and (type(height) == "number")) and height or (fontOptions.fontSize * 1.5)
-    state.strWidth = (okWidth and (type(width) == "number")) and width or (fontOptions.fontSize * 4)
     state.posX = 0
     state.posY = 0
     state.direction = 0
@@ -790,7 +823,7 @@ local function DispatchText(guid, event, text, amount, spellid, spellicon, perio
         end
     end
 
-    if (count > 1) and fctConfig.mergeEventsCounter then
+    if (text and (count > 1) and fctConfig.mergeEventsCounter) then
         text = text.." x"..tostring(count)
     end
 
@@ -891,6 +924,9 @@ local function CacheEvent(guid, event, amount, text, spellid, spellicon, periodi
 end
 
 local function ProcessCachedEvents()
+    -- The cache is only filled by the combat log handler, which WoW: Forever
+    -- does not have. Its records hold secret amounts, so it is left alone.
+    if (IsForever) then return end
     local mergingEnabled = CFCT.Config.mergeEvents
     local separateMisses = CFCT.Config.mergeEventsMisses
 
@@ -1485,6 +1521,22 @@ local function ReportCapabilities()
         else
             table.insert(lines, "  sample amount  : could not be formatted (secret), using SetFormattedText")
         end
+        -- Reports the basis of the layout on this client. Amounts are secret, so
+        -- their real width cannot be read back and a sample of the same font is
+        -- measured instead; this shows whether that measurement is allowed.
+        local catConfig = CFCT.Config.auto or CFCT.Config.spell
+        local scratch = CreateFrame("Frame")
+        local probe = scratch:CreateFontString(nil, "OVERLAY")
+        probe:SetFont(catConfig.fontPath, catConfig.fontSize, catConfig.fontStyle)
+        probe:SetText(SAMPLE_TEXT)
+        local height, width = probe:GetStringHeight(), probe:GetStringWidth()
+        if (IsSecret(height) or IsSecret(width)) then
+            table.insert(lines, "  layout basis   : measuring is secret, using the font size")
+        else
+            table.insert(lines, "  layout basis   : sample '"..SAMPLE_TEXT.."' = "..round(width, 1).." x "..round(height, 1))
+        end
+        probe:SetParent(nil)
+        scratch:Hide()
     end
     return table.concat(lines, "\n")
 end
