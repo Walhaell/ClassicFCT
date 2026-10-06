@@ -29,6 +29,17 @@ local _, _, _, ForeverTOCVersion = GetBuildInfo()
 local ForeverInterface = tonumber(ForeverTOCVersion) or 0
 local IsForever = (ForeverInterface >= 16000 and ForeverInterface < 20000)
 local issecretvalue = issecretvalue
+-- WoW: Forever: what the client's combat log actually hands over is only known
+-- after the first event, so the options that depend on it are collected here and
+-- shown or hidden by HideUnavailable once it is known. "icons" needs the spell
+-- id and "school" needs the damage school.
+local foreverOptionals = {}
+CFCT._foreverOptionals = foreverOptionals
+local function ForeverOptional(kind, frame)
+    if (not frame) then return end
+    if (not foreverOptionals[kind]) then foreverOptionals[kind] = {} end
+    tinsert(foreverOptionals[kind], frame)
+end
 -- Spell names come back as secret values on that client, so they cannot be
 -- tested for nil or dropped into a string. The spell dropdowns only want the
 -- plain ones, and this client never records a spell id anyway.
@@ -1100,8 +1111,9 @@ local function CreateCategoryPanel(self, cat, anchor, point1, point2, x, y)
     local showIconsCheckbox = f:CreateCheckbox("Show Spell Icons", "Enables/Disables showing spell icons next to damage text", f, "TOPLEFT", "TOPLEFT", 250, 0, DefaultConfig[cat].showIcons, "Config."..cat..".showIcons")
     showIconsCheckbox:SetFrameLevel(enabledCheckbox:GetFrameLevel() + 1)
     if (IsForever) then
-        -- Combat text on this client reports no spell id and no damage school,
-        -- so there is no icon to show and no type to color by.
+        -- Icons need the spell id, which this client only reports through the
+        -- combat log. HideUnavailable shows this once an event has been seen.
+        ForeverOptional("icons", showIconsCheckbox)
         showIconsCheckbox:Hide()
     end
 
@@ -1113,7 +1125,8 @@ local function CreateCategoryPanel(self, cat, anchor, point1, point2, x, y)
     if (cat:find("heal") == nil) then
         local clrDmgTypeCheckbox = f:CreateCheckbox("Color By Type", "Enables/Disables coloring damage text based on its type (alpha still taken from the text color below)", f, "TOPLEFT", "TOPLEFT", 480, 0, DefaultConfig[cat].colorByType, "Config."..cat..".colorByType")
         if (IsForever) then
-            -- Damage schools are not reported by C_CombatText on this client.
+            -- The damage school only comes with the combat log as well.
+            ForeverOptional("school", clrDmgTypeCheckbox)
             clrDmgTypeCheckbox:Hide()
         end
     end
@@ -1895,48 +1908,42 @@ local CONFIG_LAYOUT = {
     }
 }
 
--- WoW: Forever cannot tell the client anything this addon used to know about a
--- hit: the combat log is closed to addons and the amounts handed out by
--- C_CombatText are secret values, so nothing can be compared, added up or
--- looked up by spell id. Event groups that can therefore never fire, and the
--- options that would do nothing, are left out instead of being shown as if
--- they worked.
-local FOREVER_HIDDEN_PANEL = {
-    ["Damage Over Time"] = true,
-    ["Pet Auto Attacks"] = true,
-    ["Pet Special Attacks"] = true,
-    ["Pet Damage Over Time"] = true,
-    ["Pet Heals"] = true,
-    ["Pet Heals Over Time"] = true,
-}
--- A crit is reported as DAMAGE_CRIT whether a swing or a spell caused it, so it
--- is drawn with the auto attack crit style and the spell crit page is dead.
-local FOREVER_HIDDEN_CAT = {
-    spellcrit = true
-}
+-- WoW: Forever reads the combat log, so every event group this addon has is
+-- available there: DoTs, pets and spell crits all arrive as they do elsewhere.
+-- Only the amounts stay secret, so nothing that compares or adds them up can
+-- work, and those options are left out instead of being shown as if they did.
 
 ConfigPanel:HookScript("OnShow", function(self) CFCT._testMode = true end)
 ConfigPanel:HookScript("OnHide", function(self) CFCT._testMode = false end)
 for _, cat in ipairs(CONFIG_LAYOUT) do
-    if (not (IsForever and FOREVER_HIDDEN_PANEL[cat.catname])) then
-        local subpanel = ConfigPanel:CreateSubPanel(cat.catname)
-        subpanel:HookScript("OnShow", function(self) CFCT._testMode = true end)
-        subpanel:HookScript("OnHide", function(self) CFCT._testMode = false end)
-        local parent = nil
-        for _, subcat in ipairs(cat.subcatlist) do
-            if (not (IsForever and FOREVER_HIDDEN_CAT[subcat])) then
-                if not parent then
-                    parent = subpanel:CreateCategoryPanel(subcat, subpanel, "TOPLEFT", "TOPLEFT", 6, -6)
-                else
-                    parent = subpanel:CreateCategoryPanel(subcat, parent, "TOPLEFT", "BOTTOMLEFT", 0, -6)
-                end
-            end
+    local subpanel = ConfigPanel:CreateSubPanel(cat.catname)
+    subpanel:HookScript("OnShow", function(self) CFCT._testMode = true end)
+    subpanel:HookScript("OnHide", function(self) CFCT._testMode = false end)
+    local parent = nil
+    for _, subcat in ipairs(cat.subcatlist) do
+        if not parent then
+            parent = subpanel:CreateCategoryPanel(subcat, subpanel, "TOPLEFT", "TOPLEFT", 6, -6)
+        else
+            parent = subpanel:CreateCategoryPanel(subcat, parent, "TOPLEFT", "BOTTOMLEFT", 0, -6)
         end
     end
 end
 
 if (IsForever) then
     local function HideUnavailable()
+        -- Spell id, icons and damage type colors only work when the client's
+        -- combat log hands those over as plain values, which is only known once
+        -- an event has been read. The per category checkboxes and these lists
+        -- move together.
+        local support = CFCT.ForeverSupport or {}
+        local haveSpell, haveSchool = (support.spellId == "plain number"), (support.school == "plain number")
+        local function SetAvailable(kind, available)
+            for _, frame in ipairs(foreverOptionals[kind] or {}) do
+                if (available) then frame:Show() else frame:Hide() end
+            end
+        end
+        SetAvailable("icons", haveSpell)
+        SetAvailable("school", haveSchool)
         local hidden = {
             -- One Blizzard text frame on this client: no separate healing switch.
             hideBlizzHealingCheckbox,
@@ -1944,9 +1951,6 @@ if (IsForever) then
             -- no namePlateUnitToken.
             attachModeHeader, attachModeDropDown, fallbackCheckbox,
             dontOverlapNameplates, inheritNameplates, areaSliderNX, areaSliderNY,
-            -- No spell id, so no icons.
-            spellIconOptionsHeader, iconOffsetSliderX, iconOffsetSliderY,
-            iconZoomSlider, iconAspectRatioSlider,
             -- Thousands separators come from the client formatter instead, which
             -- follows the game locale.
             kiloSepCheckbox,
@@ -1960,16 +1964,32 @@ if (IsForever) then
             merginOptionsHeader, mergingEnabledCheckbox, mergingIntervalSlider,
             mergingCountCheckbox, intervalModeHeader, intervalModeDropDown,
             mergingIntervalOverrideHeader, mergingIntervalOverrideDropdown,
-            mergingOverrideIntervalSlider, mergingOverrideIntervalResetButton,
-            -- Both spell id dropdowns stay empty: no spell id is ever recorded.
-            filteringBlacklistHeader, filteringBlacklistDropdown, filteringBlacklistCheckbox,
-            -- No damage school is reported, so the type colors have nothing to do.
+            mergingOverrideIntervalSlider, mergingOverrideIntervalResetButton
+        }
+        for i = 1, #hidden do
+            if (hidden[i]) then hidden[i]:Hide() end
+        end
+        -- These need the spell id or the damage school, and their option groups
+        -- are anchored one after the other, so they are shown or hidden whole.
+        local spellOptions = {
+            spellIconOptionsHeader, iconOffsetSliderX, iconOffsetSliderY,
+            iconZoomSlider, iconAspectRatioSlider,
+            filteringBlacklistHeader, filteringBlacklistDropdown, filteringBlacklistCheckbox
+        }
+        for i = 1, #spellOptions do
+            if (spellOptions[i]) then
+                if (haveSpell) then spellOptions[i]:Show() else spellOptions[i]:Hide() end
+            end
+        end
+        local schoolOptions = {
             colorTableHeader, colorTableFrame,
             colorTableDotHeader, colorTableDotFrame,
             colorTableDotCheckbox, copyTypeColorsBtn
         }
-        for i = 1, #hidden do
-            if (hidden[i]) then hidden[i]:Hide() end
+        for i = 1, #schoolOptions do
+            if (schoolOptions[i]) then
+                if (haveSchool) then schoolOptions[i]:Show() else schoolOptions[i]:Hide() end
+            end
         end
     end
     HideUnavailable()
@@ -1978,11 +1998,11 @@ if (IsForever) then
     local notice = ConfigPanel:CreateHeader("", "GameFontHighlightSmall", filteringOptionsHeader, "TOPLEFT", "BOTTOMLEFT", 20, -100)
     notice:SetJustifyH("LEFT")
     notice:SetWidth(560)
-    notice:SetText("|cffff4040WoW: Forever:|r combat text is read through C_CombatText, whose amounts are secret values."
-        .."\n|cffff4040That means:|r no thresholds, no merging, no sorting by amount, no spell ids or icons, no damage type colors,"
-        .."\nand no per nameplate text. Damage over time is reported as a normal spell hit and crits use the auto attack crit style."
+    notice:SetText("|cffff4040WoW: Forever:|r events come from the combat log, and amounts are secret values: one cannot be read, compared or added up."
+        .."\n|cffff4040That means:|r no thresholds, no rolling average, no merging, no sorting by amount and no per nameplate text."
+        .."\nEverything else, including spell icons and damage type colors when the client reports them, works as usual."
         .."\n|cffff4040Keep|r Blizzard's Combat option |cffffffffEnable floating combat text|r |cffff4040on|r: it is the event source. \"Hide Blizzard Text\" only hides their text."
-        .."\nEverything else, including every animation, behaves as usual. Run |cffffffff/cfct diag|r to see what this client reports.")
+        .."\nRun |cffffffff/cfct diag|r to see what this client reports.")
 end
 
 
