@@ -3,6 +3,26 @@ _G[addonName] = CFCT
 local IsClassic = (WOW_PROJECT_ID == WOW_PROJECT_CLASSIC)
 local IsBCC = (WOW_PROJECT_ID == WOW_PROJECT_BURNING_CRUSADE_CLASSIC)
 local IsRetail = (WOW_PROJECT_ID == WOW_PROJECT_MAINLINE)
+-- WoW: Forever (product wow_classic_beta, interface 16xxx). It runs on the
+-- retail UI engine and inherits the retail addon restrictions, which changes
+-- where combat text comes from:
+--   * CombatLogGetCurrentEventInfo does not exist on this client, so COMBAT_LOG
+--     EVENT_UNFILTERED is unusable and every amount/flag below used to come
+--     from the combat log is gone.
+--   * The replacement is C_CombatText: the COMBAT_TEXT_UPDATE event plus
+--     C_CombatText.GetCurrentEventInfo(), whose returns are secret values.
+--     Secret values may only be handed to a C side formatter; comparing,
+--     concatenating or doing arithmetic on them throws and blanks the frame.
+-- So on Forever amounts are turned into plain strings as early as possible and
+-- everything numeric (filters, merging, sorting) is unavailable.
+local ForeverInterface = tonumber(select(4, GetBuildInfo())) or 0
+local IsForever = (ForeverInterface >= 16000 and ForeverInterface < 20000)
+    and (type(C_CombatText) == "table")
+    and (type(C_CombatText.GetCurrentEventInfo) == "function")
+CFCT.IsForever = IsForever
+CFCT.Interface = ForeverInterface
+local issecretvalue = issecretvalue
+CFCT.IsSecretValue = issecretvalue
 local tinsert, tremove, tsort, format, strlen, strsub, gsub, floor, sin, cos, asin, acos, random, select, pairs, ipairs, unpack, bitband = table.insert, table.remove, table.sort, string.format, string.len, string.sub, string.gsub, math.floor, math.sin, math.cos, math.asin, math.acos, math.random, select, pairs, ipairs, unpack, bit.band
 local InCombatLockdown = InCombatLockdown
 local AbbreviateNumbers = AbbreviateNumbers
@@ -80,6 +100,66 @@ local function FormatThousandSeparator(v)
     return strsub(s, 1, pos)..gsub(strsub(s, pos+1), "(...)", ",%1")
 end
 
+
+-- ----------------------------------------------------------------------
+-- WoW: Forever: getting an amount out of a secret value
+-- ----------------------------------------------------------------------
+-- BreakUpLargeNumbers and AbbreviateNumbers are C side, so they accept a
+-- secret number and hand back a plain, printable string. Everything that can
+-- work with a secret number has to happen inside those calls, never in Lua.
+local function IsSecret(v)
+    return (issecretvalue ~= nil) and issecretvalue(v) and true or false
+end
+
+-- Checking a payload against nil is a comparison, and a comparison on a secret
+-- value throws just like arithmetic does, so nil is only ever tested after
+-- asking whether the value is secret.
+local function IsNil(v)
+    if (IsSecret(v)) then return false end
+    return v == nil
+end
+
+local foreverAbbrevOptions
+local function ForeverAbbreviateOptions()
+    if (foreverAbbrevOptions == nil) then
+        local data = C_AbbreviateConfigAPI and C_AbbreviateConfigAPI.GetAbbreviateNumberData
+            and C_AbbreviateConfigAPI.GetAbbreviateNumberData()
+        foreverAbbrevOptions = (data and CreateAbbreviateConfig) and CreateAbbreviateConfig(data) or false
+    end
+    return foreverAbbrevOptions or nil
+end
+
+-- Returns a printable string for an amount, never a secret value. Abbreviating
+-- needs the locale options table on this client, so it is looked up once and
+-- falls back to plain formatting when it cannot be built.
+function CFCT:FormatAmount(value)
+    local fctConfig = CFCT.Config
+    if (fctConfig.abbreviateNumbers) then
+        local opts = ForeverAbbreviateOptions()
+        local ok, formatted = pcall(AbbreviateNumbers, value, opts)
+        if (ok and not IsSecret(formatted) and (formatted ~= nil)) then
+            return formatted
+        end
+    end
+    local ok, formatted = pcall(BreakUpLargeNumbers, value)
+    if (ok and not IsSecret(formatted) and (formatted ~= nil)) then
+        return formatted
+    end
+    return nil
+end
+
+-- Builds "prefix<amount>" for display. When the amount cannot be turned into a
+-- plain string, the FontString is handed the secret value itself through
+-- SetFormattedText, which is always allowed. The caller gets either a ready
+-- text or a format pattern plus the value to feed it with.
+local function ForeverText(value, prefix)
+    local formatted = CFCT:FormatAmount(value)
+    if (formatted) then
+        return prefix..formatted, nil, nil
+    end
+    return nil, prefix.."%s", value
+end
+
 local function InitFont(self, state)
     local fontOptions = state.fontOptions
     self:SetFont(fontOptions.fontPath, fontOptions.fontSize, fontOptions.fontStyle)
@@ -88,13 +168,24 @@ local function InitFont(self, state)
     self:SetJustifyH("CENTER")
     self:SetJustifyV("MIDDLE")
     -- self:SetPoint("BOTTOM", 0, 0)
-    self:SetText(state.text)
+    if (state.textFmt and (state.secretValue ~= nil)) then
+        -- WoW: Forever: the amount never became a plain string, so it is passed
+        -- straight to the FontString, which is allowed to read secret values.
+        local shown = pcall(function() self:SetFormattedText(state.textFmt, state.secretValue) end)
+        if (not shown) then self:SetText("?") end
+    else
+        self:SetText(state.text)
+    end
     self:SetTextColor(unpack(fontOptions.fontColor))
     self:SetAlpha(fontOptions.fontAlpha)
     self:SetShadowColor(0,0,0,fontOptions.fontAlpha/2)
     state.initialTime = now
-    state.strHeight = self:GetStringHeight()
-    state.strWidth = self:GetStringWidth()
+    -- Measuring is a C side operation on text the FontString already holds.
+    -- If a client ever refused it the text still gets shown, it just overlaps.
+    local okHeight, height = pcall(self.GetStringHeight, self)
+    local okWidth, width = pcall(self.GetStringWidth, self)
+    state.strHeight = (okHeight and (type(height) == "number")) and height or (fontOptions.fontSize * 1.5)
+    state.strWidth = (okWidth and (type(width) == "number")) and width or (fontOptions.fontSize * 4)
     state.posX = 0
     state.posY = 0
     state.direction = 0
@@ -350,7 +441,8 @@ local GRID = {
 local function GridLayout(unsortedFrames)
     local fctConfig = CFCT.Config
     local frames = {}
-    if fctConfig.sortByDamage then
+    -- Sorting compares amounts, which are secret values on WoW: Forever.
+    if (fctConfig.sortByDamage and not IsForever) then
         local missPrio = fctConfig.sortMissPrio
         local tinsert = tinsert
         local count = 0
@@ -509,6 +601,15 @@ local WorldFrame = WorldFrame
 local GetNamePlateForUnit = C_NamePlate.GetNamePlateForUnit
 local function UpdateFontParent(self)
     local fctConfig = CFCT.Config
+    if IsForever then
+        -- Combat text on this client carries no unit token and its nameplates
+        -- have no namePlateUnitToken, so there is nothing to look up and
+        -- nothing to inherit a scale from: everything stays on the screen.
+        self:SetParent(UIParent)
+        self.state.baseScale = 1
+        self.state.attach = f
+        return
+    end
     local nameplate = UnitExists(self.state.unit) and GetNamePlateForUnit(self.state.unit) or false
     local attach
     if ((fctConfig.attachMode == "tn") or (fctConfig.attachMode == "en")) and nameplate then
@@ -649,38 +750,47 @@ local function GetDotTypeColor(school)
 end
 
 
-local function DispatchText(guid, event, text, amount, spellid, spellicon, periodic, crit, miss, pet, school, count)
+local function DispatchText(guid, event, text, amount, spellid, spellicon, periodic, crit, miss, pet, school, count, textFmt, secretValue)
     local cat = (pet and "pet" or "")..event..(periodic and "tick" or "")..(crit and "crit" or miss and "miss" or "")
     local fctConfig = CFCT.Config
     local catConfig = fctConfig[cat]
-    text = text or tostring(amount)
     -- TODO put fctConfig and catConfig into state
 
     count = count or 1
-    if (not miss) then
-        if (not crit) then
-            AddToAverage(amount / count)
+    if (IsForever) then
+        -- Every feature in the block below needs to compare or add up amounts,
+        -- and amounts are secret values on WoW: Forever: no rolling average, no
+        -- thresholds, no abbreviating here. The amount arrives either as a
+        -- ready made string or as a format pattern plus the secret value.
+        if (not text) and (not textFmt) then
+            text = CFCT:FormatAmount(amount) or ""
         end
-        if (fctConfig.filterAbsoluteEnabled and (fctConfig.filterAbsoluteThreshold > amount))
-        or (fctConfig.filterRelativeEnabled and ((fctConfig.filterRelativeThreshold * 0.01 * CFCT:UnitHealthMax('player')) > amount))
-        or (fctConfig.filterAverageEnabled and ((fctConfig.filterAverageThreshold * 0.01 * CFCT:DamageRollingAverage()) > amount)) then
-            return false
-        end
+    else
+        text = text or tostring(amount)
+        if (not miss) then
+            if (not crit) then
+                AddToAverage(amount / count)
+            end
+            if (fctConfig.filterAbsoluteEnabled and (fctConfig.filterAbsoluteThreshold > amount))
+    or (fctConfig.filterRelativeEnabled and ((fctConfig.filterRelativeThreshold * 0.01 * CFCT:UnitHealthMax('player')) > amount))
+    or (fctConfig.filterAverageEnabled and ((fctConfig.filterAverageThreshold * 0.01 * CFCT:DamageRollingAverage()) > amount)) then
+                return false
+            end
 
-        if (fctConfig.abbreviateNumbers) then
-            text = AbbreviateNumbers(amount)
-        elseif (fctConfig.kiloSeparator) then
-            text = FormatThousandSeparator(amount)
+            if (fctConfig.abbreviateNumbers) then
+                text = AbbreviateNumbers(amount)
+            elseif (fctConfig.kiloSeparator) then
+                text = FormatThousandSeparator(amount)
+            end
         end
     end
-    
+
     if (count > 1) and fctConfig.mergeEventsCounter then
         text = text.." x"..tostring(count)
     end
 
-    if (spellicon and catConfig.showIcons) then text = spellicon..text end
+    if (not textFmt) and (spellicon and catConfig.showIcons) then text = spellicon..text end
 
-    
     local fontColor, fontAlpha
     local typeColor = periodic and fctConfig.colorTableDotEnabled and GetDotTypeColor(school) or GetDamageTypeColor(school)
     if (catConfig.colorByType == true) and typeColor then
@@ -699,6 +809,8 @@ local function DispatchText(guid, event, text, amount, spellid, spellicon, perio
         guid = guid,
         icon = spellicon,
         text = text,
+        textFmt = textFmt,
+        secretValue = secretValue,
         amount = amount,
         miss = miss,
         baseAlpha = 1,
@@ -821,6 +933,23 @@ function CFCT:Test(n)
         "spell",
         "heal"
     }
+    if (IsForever) then
+        -- No nameplates to spread over and UnitGUID is a secret value here, so
+        -- the preview uses made up amounts instead of live units. They are
+        -- plain numbers, which is also the only way to exercise the number
+        -- formatting code path from the options panel.
+        for i = 1, n do
+            local school = random(1,128)
+            local crit = (random(1,3) == 1)
+            local miss = not crit and (random(1,2) == 1)
+            local event = cats[random(1,#cats)]
+            local amount = crit and 2674 or 1337
+            local amountText = CFCT:FormatAmount(amount) or tostring(amount)
+            local text = miss and ForeverMissText("MISS") or ((event == "heal" and "+" or "-")..amountText)
+            DispatchText(nil, event, text, nil, nil, "", false, crit, miss, false, school)
+        end
+        return
+    end
     local nameplates = C_NamePlate.GetNamePlates()
     local numplates = #nameplates
     local it = (numplates > 0) and (n*numplates) or n
@@ -851,7 +980,26 @@ end
 
 local CVAR_CHECK_INTERVAL = 5
 local cvarTimer = 0
+local foreverBlizzHidden = false
 local function checkCvars()
+    if (IsForever) then
+        -- The old floatingCombatTextCombatDamage/CombatHealing cvars are gone
+        -- on this client. Blizzard's CombatText frame stops drawing while it
+        -- is hidden (its OnEvent bails early), so that is what gets hidden
+        -- instead, and it is put back as soon as the option is turned off.
+        local blizzFrame = _G.CombatText
+        if (blizzFrame) then
+            local wantHidden = CFCT.hideBlizz and true or false
+            if (wantHidden and not foreverBlizzHidden) then
+                foreverBlizzHidden = true
+                blizzFrame:Hide()
+            elseif (not wantHidden and foreverBlizzHidden) then
+                foreverBlizzHidden = false
+                blizzFrame:Show()
+            end
+        end
+        return
+    end
     if (GetCVarDefault("floatingCombatTextCombatDamage")) then
         local varHideDamage = CFCT.hideBlizz and "0" or "1"
         local cvarHideDamage = GetCVar("floatingCombatTextCombatDamage")
@@ -875,23 +1023,167 @@ local function checkCvars()
         end
     end
 end
+-- Lets the options panel apply a "Hide Blizzard Text" change right away.
+CFCT.ApplyBlizzardTextVisibility = checkCvars
 
 
 
-local events = {
-    COMBAT_LOG_EVENT_UNFILTERED = true,
-    UNIT_MAXHEALTH = true,
-    ADDON_LOADED = true,
-    PLAYER_LOGOUT = true,
-    PLAYER_ENTERING_WORLD = true,
-    NAME_PLATE_UNIT_ADDED = true,
-    NAME_PLATE_UNIT_REMOVED = true
+-- ----------------------------------------------------------------------
+-- WoW: Forever: C_CombatText
+-- ----------------------------------------------------------------------
+-- This client does not hand addons a usable combat log, so the only sanctioned
+-- source of combat text is the COMBAT_TEXT_UPDATE event. The payload is read
+-- with C_CombatText.GetCurrentEventInfo(), which returns up to three values
+-- whose meaning depends on the message type (same shape Blizzard's own
+-- CombatText.lua uses):
+--   damage types    data = amount, arg3 = blocked/absorbed part
+--   heal types      data = healer name, arg3 = amount, arg4 = absorbed part
+--   miss types      nothing to format, just a label
+-- What is *not* reported, and what the categories below therefore give up:
+--   spell ids and icons, damage schools, pets and damage over time. A crit is
+--   reported as DAMAGE_CRIT whether it came from a swing or from a spell, so it
+--   is shown with the auto attack crit style.
+local FOREVER_MISS_TYPE = {
+    MISS = true, DODGE = true, PARRY = true, EVADE = true, IMMUNE = true,
+    DEFLECT = true, REFLECT = true, MISFIRE = true
 }
+local FOREVER_MISS_LABEL = {
+    MISS = "MISS", DODGE = "DODGE", PARRY = "PARRY", EVADE = "EVADE",
+    IMMUNE = "IMMUNE", DEFLECT = "DEFLECT", REFLECT = "REFLECT", MISFIRE = "MISFIRE"
+}
+local FOREVER_REDUCTION_TYPE = {
+    BLOCK = "BLOCK", SPELL_BLOCK = "BLOCK",
+    ABSORB = "ABSORB", SPELL_ABSORB = "ABSORB",
+    RESIST = "RESIST", SPELL_RESIST = "RESIST"
+}
+-- Message types that carry a damage amount, and which ClassicFCT category each
+-- one belongs to. There is no separate type for a damage over time tick, so
+-- those arrive as a normal spell hit.
+local FOREVER_DAMAGE_TYPE = {
+    DAMAGE = "auto", DAMAGE_CRIT = "auto", DAMAGE_SHIELD = "spell",
+    SPELL_DAMAGE = "spell", SPLIT_DAMAGE = "spell"
+}
+local FOREVER_HEAL_TYPE = {
+    HEAL = "heal", HEAL_CRIT = "heal", HEAL_ABSORB = "heal", HEAL_CRIT_ABSORB = "heal",
+    PERIODIC_HEAL = "healtick", PERIODIC_HEAL_CRIT = "healtick", PERIODIC_HEAL_ABSORB = "healtick"
+}
+
+local function ForeverMissText(messageType)
+    return _G["COMBAT_TEXT_"..messageType] or FOREVER_MISS_LABEL[messageType] or messageType
+end
+
+local function ForeverReductionText(reductionType)
+    return _G["COMBAT_TEXT_"..reductionType] or reductionType
+end
+
+local foreverUnit = "player"
+local function ForeverSetActiveUnit()
+    if (type(C_CombatText.SetActiveUnit) == "function") then
+        C_CombatText.SetActiveUnit(foreverUnit)
+    end
+end
+
+local function ForeverDispatch(event, text, textFmt, secretValue, periodic, crit, miss, count)
+    if (CFCT.enabled == false) then return end
+    local fctConfig = CFCT.Config
+    if (miss and fctConfig.filterMissesEnabled) then return end
+    -- Merging needs to add amounts together and needs a spell id to group by,
+    -- neither of which exists here, so events go straight to the animator.
+    DispatchText(nil, event, text, nil, nil, "", periodic, crit, miss, false, nil, count, textFmt, secretValue)
+end
+
+function f:COMBAT_TEXT_UPDATE(messageType)
+    if (CFCT.enabled == false) then return end
+    if (not messageType) then return end
+    local data, arg3, arg4 = C_CombatText.GetCurrentEventInfo()
+    local isSpell = (strsub(messageType, 1, 6) == "SPELL_")
+    local typeName = isSpell and strsub(messageType, 7) or messageType
+
+    if (FOREVER_MISS_TYPE[typeName]) then
+        ForeverDispatch(isSpell and "spell" or "auto", ForeverMissText(typeName), nil, nil, false, false, true)
+    elseif (FOREVER_DAMAGE_TYPE[messageType]) then
+        if (IsNil(data)) then return end
+        local crit = (messageType == "DAMAGE_CRIT")
+        local text, textFmt, secretValue = ForeverText(data, "-")
+        ForeverDispatch(FOREVER_DAMAGE_TYPE[messageType], text, textFmt, secretValue, false, crit, false)
+    elseif (FOREVER_HEAL_TYPE[messageType]) then
+        if (IsNil(arg3)) then return end
+        local event = FOREVER_HEAL_TYPE[messageType]
+        local crit = (strfind(messageType, "_CRIT") ~= nil)
+        local text, textFmt, secretValue = ForeverText(arg3, "+")
+        if (text and not IsNil(arg4)) then
+            local absorbed = CFCT:FormatAmount(arg4)
+            text = text.." ("..(absorbed or "?").." "..ForeverReductionText("ABSORB")..")"
+        end
+        ForeverDispatch(event, text, textFmt, secretValue, event == "healtick", crit, false)
+    elseif (FOREVER_REDUCTION_TYPE[messageType]) then
+        local event = isSpell and "spell" or "auto"
+        if (not IsNil(arg3)) and (not IsNil(data)) then
+            -- Partial block/absorb/resist: the hit itself, with what was soaked.
+            local text, textFmt, secretValue = ForeverText(data, "-")
+            local partial = CFCT:FormatAmount(arg3)
+            local trailer = partial and (ForeverReductionText(FOREVER_REDUCTION_TYPE[messageType])..": "..partial) or nil
+            if (text and trailer) then
+                text = text.." ("..trailer..")"
+            elseif (textFmt) then
+                textFmt = textFmt.." ("..(trailer or "?")..")"
+            else
+                return
+            end
+            ForeverDispatch(event, text, textFmt, secretValue, false, false, false)
+        else
+            -- Fully blocked/absorbed/resisted: only the label is worth showing.
+            ForeverDispatch(event, ForeverReductionText(FOREVER_REDUCTION_TYPE[messageType]), nil, nil, false, false, true)
+        end
+    end
+end
+
+function f:UNIT_ENTERED_VEHICLE(unit, showVehicle)
+    if (unit == "player") then
+        foreverUnit = showVehicle and "vehicle" or "player"
+        ForeverSetActiveUnit()
+    end
+end
+function f:UNIT_EXITING_VEHICLE(unit)
+    if (unit == "player") then
+        foreverUnit = "player"
+        ForeverSetActiveUnit()
+    end
+end
+
+local events
+if (IsForever) then
+    events = {
+        COMBAT_TEXT_UPDATE = true,
+        UNIT_ENTERED_VEHICLE = true,
+        UNIT_EXITING_VEHICLE = true,
+        ADDON_LOADED = true,
+        PLAYER_LOGOUT = true,
+        PLAYER_ENTERING_WORLD = true
+    }
+else
+    events = {
+        COMBAT_LOG_EVENT_UNFILTERED = true,
+        UNIT_MAXHEALTH = true,
+        ADDON_LOADED = true,
+        PLAYER_LOGOUT = true,
+        PLAYER_ENTERING_WORLD = true,
+        NAME_PLATE_UNIT_ADDED = true,
+        NAME_PLATE_UNIT_REMOVED = true
+    }
+end
 for e,_ in pairs(events) do f:RegisterEvent(e) end
-f:SetScript("OnEvent", function(self, event, ...) self[event](self, ...) end)
+f:SetScript("OnEvent", function(self, event, ...) if (self[event]) then self[event](self, ...) end end)
 
 local function SortByUnit(allFrames)
     local fctConfig = CFCT.Config
+    if (IsForever) then
+        -- One single area: combat text here has no unit to group by.
+        for k, frame in ipairs(allFrames) do
+            frame.state.unit = "player"
+        end
+        return {player = allFrames}
+    end
     local animAreas = {target={}}
     for k, frame in ipairs(allFrames) do
         local state = frame.state
@@ -961,6 +1253,9 @@ f:Show()
 function f:ADDON_LOADED(name)
     if (name == addonName) then
         CFCT.Config:OnLoad()
+        if (IsForever) then
+            ForeverSetActiveUnit()
+        end
         local version = GetAddOnMetadata(addonName, "Version")
         if (version ~= CFCT.lastVersion) then
             C_Timer.After(5,function()
@@ -981,11 +1276,18 @@ end
 
 local playerGUID
 function f:PLAYER_ENTERING_WORLD()
+    if (IsForever) then
+        -- UnitGUID is a secret value here and combat text carries no unit, so
+        -- there is nothing to look up; just make sure the watched unit is set.
+        ForeverSetActiveUnit()
+        return
+    end
     playerGUID = UnitGUID("player")
 end
 
 local nameplates = {}
 function f:NAME_PLATE_UNIT_ADDED(unit)
+    if (IsForever) then return end
     local guid = UnitGUID(unit)
     nameplates[unit] = guid
     nameplates[guid] = unit 
@@ -1133,6 +1435,59 @@ function f:HealingEvent(guid, spellid, amount, periodic, crit, pet, school)
     local event = "heal"
     local spellicon = spellid and SpellIconText(spellid) or ""
     CacheEvent(guid, event, amount, nil, spellid, spellicon, periodic, crit, false, pet, school)
+end
+
+
+-- ----------------------------------------------------------------------
+-- Slash commands
+-- ----------------------------------------------------------------------
+SLASH_CLASSICFCT1 = "/classicfct"
+SLASH_CLASSICFCT2 = "/cfct"
+
+local function ReportCapabilities()
+    local interface = tonumber(select(4, GetBuildInfo())) or 0
+    local lines = {
+        "ClassicFCT - client capabilities",
+        "  interface      : "..tostring(interface).." ("..tostring(select(2, GetBuildInfo()))..")",
+        "  flavor mode    : "..(IsForever and "WoW: Forever (C_CombatText)" or "combat log (COMBAT_LOG_EVENT_UNFILTERED)"),
+        "  C_CombatText   : "..tostring(type(C_CombatText)),
+        "  issecretvalue  : "..tostring(type(issecretvalue)),
+        "  CLEU reader    : "..tostring(type(CombatLogGetCurrentEventInfo)),
+        "  watched unit   : "..tostring(foreverUnit),
+    }
+    if (IsForever) then
+        -- This event is only sent while the client's own floating combat text
+        -- is enabled, so that setting has to stay on for anything to show up.
+        local ok, enabled = pcall(function() return C_CVar.GetCVarBool("enableFloatingCombatText") end)
+        if (ok) then
+            table.insert(lines, "  blizz fct cvar  : "..(enabled and "on (required)" or "OFF - nothing will show"))
+        end
+        -- Lets a player confirm how this build behaves on their client without
+        -- having to read any code: if the last line says plain, amounts can be
+        -- turned into strings and everything is displayed by this addon; if it
+        -- says secret, amounts are handed to the FontString instead.
+        local sample = CFCT:FormatAmount(1234567)
+        if (sample) then
+            table.insert(lines, "  sample amount  : "..tostring(sample).." (plain string)")
+        else
+            table.insert(lines, "  sample amount  : could not be formatted (secret), using SetFormattedText")
+        end
+    end
+    return table.concat(lines, "\n")
+end
+
+SlashCmdList["CLASSICFCT"] = function(msg)
+    msg = strtrim(msg or "")
+    local cmd, rest = msg:match("^(%S*)%s*(.*)$")
+    cmd = strlower(cmd or "")
+    if (cmd == "diag" or cmd == "") then
+        CFCT:Log(ReportCapabilities())
+    elseif (cmd == "reload") then
+        CFCT:Log("Reloading ClassicFCT...")
+        C_Timer.After(1, function() ReloadUI() end)
+    else
+        CFCT:Log("Commands: /cfct diag, /cfct reload")
+    end
 end
 
 

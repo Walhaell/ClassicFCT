@@ -19,6 +19,23 @@ end or C_Spell.GetSpellInfo
 local IsRetail = (WOW_PROJECT_ID == WOW_PROJECT_MAINLINE)
 local IsClassic = (WOW_PROJECT_ID == WOW_PROJECT_CLASSIC)
 local IsBCC = (WOW_PROJECT_ID == WOW_PROJECT_BURNING_CRUSADE_CLASSIC)
+-- WoW: Forever: interface 16xxx, retail engine, retail addon restrictions.
+-- This file is loaded before main.lua, so the client version is the only thing
+-- it can go by; main.lua additionally requires C_CombatText before it will
+-- read any combat text.
+local ForeverInterface = tonumber(select(4, GetBuildInfo())) or 0
+local IsForever = (ForeverInterface >= 16000 and ForeverInterface < 20000)
+local issecretvalue = issecretvalue
+-- Spell names come back as secret values on that client, so they cannot be
+-- tested for nil or dropped into a string. The spell dropdowns only want the
+-- plain ones, and this client never records a spell id anyway.
+local function SpellName(spell)
+    if (type(spell) ~= "table") then return nil end
+    local name = spell.name
+    if (name == nil) then return nil end
+    if (issecretvalue and issecretvalue(name)) then return nil end
+    return name
+end
 local UsesNewSettingsInterface = (Settings and (type(Settings.RegisterAddOnCategory) == 'function'))
 local UsesNewColorPicker = OpacitySliderFrame == nil or ((type(OpacitySliderFrame.GetParent) == 'function') and OpacitySliderFrame:GetParent():GetName() ~= "ColorPickerFrame")
 local DefaultPresets = CFCT:GetDefaultPresets()
@@ -1079,6 +1096,11 @@ local function CreateCategoryPanel(self, cat, anchor, point1, point2, x, y)
     end)
     local showIconsCheckbox = f:CreateCheckbox("Show Spell Icons", "Enables/Disables showing spell icons next to damage text", f, "TOPLEFT", "TOPLEFT", 250, 0, DefaultConfig[cat].showIcons, "Config."..cat..".showIcons")
     showIconsCheckbox:SetFrameLevel(enabledCheckbox:GetFrameLevel() + 1)
+    if (IsForever) then
+        -- Combat text on this client reports no spell id and no damage school,
+        -- so there is no icon to show and no type to color by.
+        showIconsCheckbox:Hide()
+    end
 
     local fontFaceDropDown = f:CreateFontDropdown("Font Face", "Font face used", f, "TOPLEFT", "TOPLEFT", -16, -28, DefaultConfig[cat].fontPath, "Config."..cat..".fontPath")
     local fontStyleDropDown = f:CreateDropDownMenu("Font Style", "Font style used", f, "TOPLEFT", "TOPLEFT", 154, -28, FontStylesMenu, "Config."..cat..".fontStyle")
@@ -1087,6 +1109,10 @@ local function CreateCategoryPanel(self, cat, anchor, point1, point2, x, y)
     local colorWidget = f:CreateColorOption("Text Color", "Custom text color for this event", f, "TOPLEFT", "TOPLEFT", 170+180+160, -30, DefaultConfig[cat].fontColor, "Config."..cat..".fontColor")
     if (cat:find("heal") == nil) then
         local clrDmgTypeCheckbox = f:CreateCheckbox("Color By Type", "Enables/Disables coloring damage text based on its type (alpha still taken from the text color below)", f, "TOPLEFT", "TOPLEFT", 480, 0, DefaultConfig[cat].colorByType, "Config."..cat..".colorByType")
+        if (IsForever) then
+            -- Damage schools are not reported by C_CombatText on this client.
+            clrDmgTypeCheckbox:Hide()
+        end
     end
     local animPanel = {}
     animPanel.Pow = CreatePowAnimationPanel(f, cat, f, "TOPLEFT", "TOPLEFT", 0, -70)
@@ -1288,16 +1314,32 @@ end)
 local enabledCheckbox = ConfigPanel:CreateCheckbox("Enable ClassicFCT", "Enables/Disables the addon", charSpecificCheckbox, "TOPLEFT", "BOTTOMLEFT", 0, -2, DefaultVars.enabled, "enabled")
 
 local hideBlizzDamageCheckbox = ConfigPanel:CreateCheckbox("Hide Blizzard Damage", "Enables/Disables the default Blizzard Floating Damage Text", enabledCheckbox, "LEFT", "RIGHT", 150, 0, DefaultVars.hideBlizz, "hideBlizz")
-hideBlizzDamageCheckbox:HookScript("OnClick", function(self)
-    SetCVar("floatingCombatTextCombatDamage", self:GetChecked() and "0" or "1")
-end)
-if (GetCVarDefault("floatingCombatTextCombatDamage") == nil) then hideBlizzDamageCheckbox:Hide() end
+if (IsForever) then
+    -- No floatingCombatTextCombatDamage cvar on this client: Blizzard's
+    -- CombatText frame is hidden instead, which also takes its healing text
+    -- with it, so there is only one switch to offer.
+    hideBlizzDamageCheckbox.label:SetText("Hide Blizzard Text")
+    hideBlizzDamageCheckbox:HookScript("OnClick", function()
+        if (CFCT.ApplyBlizzardTextVisibility) then
+            CFCT.ApplyBlizzardTextVisibility()
+        end
+    end)
+else
+    hideBlizzDamageCheckbox:HookScript("OnClick", function(self)
+        SetCVar("floatingCombatTextCombatDamage", self:GetChecked() and "0" or "1")
+    end)
+end
+if (not IsForever) and (GetCVarDefault("floatingCombatTextCombatDamage") == nil) then hideBlizzDamageCheckbox:Hide() end
 
 local hideBlizzHealingCheckbox = ConfigPanel:CreateCheckbox("Hide Blizzard Healing", "Enables/Disables the default Blizzard Floating Healing Text", hideBlizzDamageCheckbox, "LEFT", "RIGHT", 150, 0, DefaultVars.hideBlizzHeals, "hideBlizzHeals")
-hideBlizzHealingCheckbox:HookScript("OnClick", function(self)
-    SetCVar("floatingCombatTextCombatHealing", self:GetChecked() and "0" or "1")
-end)
-if (GetCVarDefault("floatingCombatTextCombatHealing") == nil) then hideBlizzDamageCheckbox:Hide() end
+if (IsForever) then
+    hideBlizzHealingCheckbox:Hide()
+else
+    hideBlizzHealingCheckbox:HookScript("OnClick", function(self)
+        SetCVar("floatingCombatTextCombatHealing", self:GetChecked() and "0" or "1")
+    end)
+    if (GetCVarDefault("floatingCombatTextCombatHealing") == nil) then hideBlizzDamageCheckbox:Hide() end
+end
 
 local headerPresets = ConfigPanel:CreateHeader("Config Presets", "GameFontNormalLarge", headerGlobal, "TOPLEFT", "BOTTOMLEFT", 0, -46)
 local newPresetBtn = ConfigPanel:CreateButton("New", "Creates a new preset", headerPresets, "TOPLEFT", "TOPRIGHT", 94, 0, function()
@@ -1423,6 +1465,7 @@ local relativeThresholdSlider = ConfigPanel:CreateSlider("% of Max Player Health
 local relativeThresholdTimer = 0
 relativeThresholdSlider:HookScript("OnUpdate", function(self)
     if not self:IsShown() then return end
+    if IsForever then return end
     local now = GetTime()
     if ((now - relativeThresholdTimer) > 0.1) then
         getglobal(self:GetName() .. 'Text'):SetText("% of Max Player Health ("..tostring(floor(CFCT:UnitHealthMax('player') * 0.01 * CFCT.Config.filterRelativeThreshold))..")")
@@ -1434,6 +1477,7 @@ local averageThresholdSlider = ConfigPanel:CreateSlider("% of Average Damage/Hea
 local averageThresholdTimer = 0
 averageThresholdSlider:HookScript("OnUpdate", function(self)
     if not self:IsShown() then return end
+    if IsForever then return end
     local now = GetTime()
     if ((now - averageThresholdTimer) > 0.1) then
         getglobal(self:GetName() .. 'Text'):SetText("% of Average Damage/Healing ("..tostring(floor(CFCT:DamageRollingAverage() * 0.01 * CFCT.Config.filterAverageThreshold))..")")
@@ -1468,10 +1512,11 @@ filteringBlacklistDropdown:HookScript("OnShow", function(self)
     local color = "FFFFFF"
     for k,v in pairs(spellIdTable) do
         local spell = GetSpellInfo(k)
-        if spell.name then
+        local spellname = SpellName(spell)
+        if spellname then
             CFCT.spellIdCache[k] = true
             table.insert(FilteringBlacklistMenu, {
-                text = format("|T%s:12:12:0:0:120:120:10:110:10:110|t|cff%s%s(%d)|r", spell.iconID, color, spell.name, k),
+                text = format("|T%s:12:12:0:0:120:120:10:110:10:110|t|cff%s%s(%d)|r", spell.iconID, color, spellname, k),
                 value = k
             })
         end
@@ -1480,9 +1525,10 @@ filteringBlacklistDropdown:HookScript("OnShow", function(self)
     for k,v in pairs(CFCT.spellIdCache) do
         if (spellIdTable[k] == nil) then
             local spell = GetSpellInfo(k)
-            if spell.name then
+            local spellname = SpellName(spell)
+            if spellname then
                 table.insert(FilteringBlacklistMenu, {
-                    text = format("|T%s:12:12:0:0:120:120:10:110:10:110|t|cff%s%s(%d)|r", spell.iconID, color, spell.name, k),
+                    text = format("|T%s:12:12:0:0:120:120:10:110:10:110|t|cff%s%s(%d)|r", spell.iconID, color, spellname, k),
                     value = k
                 })
             end
@@ -1593,10 +1639,11 @@ mergingIntervalOverrideDropdown:HookScript("OnShow", function(self)
     local color = "FFFFFF"
     for k,v in pairs(spellIdTable) do
         local spell = GetSpellInfo(k)
-        if spell.name then
+        local spellname = SpellName(spell)
+        if spellname then
             CFCT.spellIdCache[k] = true
             table.insert(MergeIntervalOverrideMenu, {
-                text = format("|T%s:12:12:0:0:120:120:10:110:10:110|t|cff%s%s(%d)|r", spell.iconID, color, spell.name, k),
+                text = format("|T%s:12:12:0:0:120:120:10:110:10:110|t|cff%s%s(%d)|r", spell.iconID, color, spellname, k),
                 value = k
             })
         end
@@ -1605,9 +1652,10 @@ mergingIntervalOverrideDropdown:HookScript("OnShow", function(self)
     for k,v in pairs(CFCT.spellIdCache) do
         if (spellIdTable[k] == nil)then
             local spell = GetSpellInfo(k)
-            if spell.name then
+            local spellname = SpellName(spell)
+            if spellname then
                 table.insert(MergeIntervalOverrideMenu, {
-                    text = format("|T%s:12:12:0:0:120:120:10:110:10:110|t|cff%s%s(%d)|r", spell.iconID, color, spell.name, k),
+                    text = format("|T%s:12:12:0:0:120:120:10:110:10:110|t|cff%s%s(%d)|r", spell.iconID, color, spellname, k),
                     value = k
                 })
             end
@@ -1844,20 +1892,94 @@ local CONFIG_LAYOUT = {
     }
 }
 
+-- WoW: Forever cannot tell the client anything this addon used to know about a
+-- hit: the combat log is closed to addons and the amounts handed out by
+-- C_CombatText are secret values, so nothing can be compared, added up or
+-- looked up by spell id. Event groups that can therefore never fire, and the
+-- options that would do nothing, are left out instead of being shown as if
+-- they worked.
+local FOREVER_HIDDEN_PANEL = {
+    ["Damage Over Time"] = true,
+    ["Pet Auto Attacks"] = true,
+    ["Pet Special Attacks"] = true,
+    ["Pet Damage Over Time"] = true,
+    ["Pet Heals"] = true,
+    ["Pet Heals Over Time"] = true,
+}
+-- A crit is reported as DAMAGE_CRIT whether a swing or a spell caused it, so it
+-- is drawn with the auto attack crit style and the spell crit page is dead.
+local FOREVER_HIDDEN_CAT = {
+    spellcrit = true
+}
+
 ConfigPanel:HookScript("OnShow", function(self) CFCT._testMode = true end)
 ConfigPanel:HookScript("OnHide", function(self) CFCT._testMode = false end)
 for _, cat in ipairs(CONFIG_LAYOUT) do
-    local subpanel = ConfigPanel:CreateSubPanel(cat.catname)
-    subpanel:HookScript("OnShow", function(self) CFCT._testMode = true end)
-    subpanel:HookScript("OnHide", function(self) CFCT._testMode = false end)
-    local parent = nil
-    for _, subcat in ipairs(cat.subcatlist) do
-        if not parent then
-            parent = subpanel:CreateCategoryPanel(subcat, subpanel, "TOPLEFT", "TOPLEFT", 6, -6)
-        else
-            parent = subpanel:CreateCategoryPanel(subcat, parent, "TOPLEFT", "BOTTOMLEFT", 0, -6)
+    if (not (IsForever and FOREVER_HIDDEN_PANEL[cat.catname])) then
+        local subpanel = ConfigPanel:CreateSubPanel(cat.catname)
+        subpanel:HookScript("OnShow", function(self) CFCT._testMode = true end)
+        subpanel:HookScript("OnHide", function(self) CFCT._testMode = false end)
+        local parent = nil
+        for _, subcat in ipairs(cat.subcatlist) do
+            if (not (IsForever and FOREVER_HIDDEN_CAT[subcat])) then
+                if not parent then
+                    parent = subpanel:CreateCategoryPanel(subcat, subpanel, "TOPLEFT", "TOPLEFT", 6, -6)
+                else
+                    parent = subpanel:CreateCategoryPanel(subcat, parent, "TOPLEFT", "BOTTOMLEFT", 0, -6)
+                end
+            end
         end
     end
+end
+
+if (IsForever) then
+    local function HideUnavailable()
+        local hidden = {
+            -- One Blizzard text frame on this client: no separate healing switch.
+            hideBlizzHealingCheckbox,
+            -- No per unit anchoring: combat text has no unit and nameplates have
+            -- no namePlateUnitToken.
+            attachModeHeader, attachModeDropDown, fallbackCheckbox,
+            dontOverlapNameplates, inheritNameplates, areaSliderNX, areaSliderNY,
+            -- No spell id, so no icons.
+            spellIconOptionsHeader, iconOffsetSliderX, iconOffsetSliderY,
+            iconZoomSlider, iconAspectRatioSlider,
+            -- Thousands separators come from the client formatter instead, which
+            -- follows the game locale.
+            kiloSepCheckbox,
+            -- Thresholds compare amounts, which are secret values.
+            absoluteFilterCheckbox, absoluteThresholdSlider,
+            relativeFilterCheckbox, relativeThresholdSlider,
+            averageFilterCheckbox, averageThresholdSlider,
+            -- Sorting compares amounts too.
+            sortingOptionsHeader, sortByDamageCheckbox,
+            -- Merging adds amounts up and groups them by spell id.
+            merginOptionsHeader, mergingEnabledCheckbox, mergingIntervalSlider,
+            mergingCountCheckbox, intervalModeHeader, intervalModeDropDown,
+            mergingIntervalOverrideHeader, mergingIntervalOverrideDropdown,
+            mergingOverrideIntervalSlider, mergingOverrideIntervalResetButton,
+            -- Both spell id dropdowns stay empty: no spell id is ever recorded.
+            filteringBlacklistHeader, filteringBlacklistDropdown, filteringBlacklistCheckbox,
+            -- No damage school is reported, so the type colors have nothing to do.
+            colorTableHeader, colorTableFrame,
+            colorTableDotHeader, colorTableDotFrame,
+            colorTableDotCheckbox, copyTypeColorsBtn
+        }
+        for i = 1, #hidden do
+            if (hidden[i]) then hidden[i]:Hide() end
+        end
+    end
+    HideUnavailable()
+    ConfigPanel:HookScript("OnShow", HideUnavailable)
+
+    local notice = ConfigPanel:CreateHeader("", "GameFontHighlightSmall", filteringOptionsHeader, "TOPLEFT", "BOTTOMLEFT", 20, -100)
+    notice:SetJustifyH("LEFT")
+    notice:SetWidth(560)
+    notice:SetText("|cffff4040WoW: Forever:|r combat text is read through C_CombatText, whose amounts are secret values."
+        .."\n|cffff4040That means:|r no thresholds, no merging, no sorting by amount, no spell ids or icons, no damage type colors,"
+        .."\nand no per nameplate text. Damage over time is reported as a normal spell hit and crits use the auto attack crit style."
+        .."\n|cffff4040Keep|r Blizzard's Combat option |cffffffffEnable floating combat text|r |cffff4040on|r: it is the event source. \"Hide Blizzard Text\" only hides their text."
+        .."\nEverything else, including every animation, behaves as usual. Run |cffffffff/cfct diag|r to see what this client reports.")
 end
 
 

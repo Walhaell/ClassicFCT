@@ -1,3 +1,8 @@
+0.88a   Oct 6, 2026
+    - Added support for WoW: Forever (new ClassicFCT-Camelot.toc, interface 16001)
+    - Forever reads combat text from C_CombatText, since the combat log is closed to addons there
+    - Added /cfct diag to report what the running client supports
+
 0.87u   Aug 16, 2024
     - Fixed miss filter, ColorPicker and Config panels for The War Within
 
