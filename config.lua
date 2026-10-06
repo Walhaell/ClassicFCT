@@ -23,7 +23,10 @@ local IsBCC = (WOW_PROJECT_ID == WOW_PROJECT_BURNING_CRUSADE_CLASSIC)
 -- This file is loaded before main.lua, so the client version is the only thing
 -- it can go by; main.lua additionally requires C_CombatText before it will
 -- read any combat text.
-local ForeverInterface = tonumber(select(4, GetBuildInfo())) or 0
+-- Fourth value of GetBuildInfo, taken into a name on purpose: this client
+-- returns more values than that and passing them all on would break.
+local _, _, _, ForeverTOCVersion = GetBuildInfo()
+local ForeverInterface = tonumber(ForeverTOCVersion) or 0
 local IsForever = (ForeverInterface >= 16000 and ForeverInterface < 20000)
 local issecretvalue = issecretvalue
 -- Spell names come back as secret values on that client, so they cannot be

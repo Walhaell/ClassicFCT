@@ -15,7 +15,12 @@ local IsRetail = (WOW_PROJECT_ID == WOW_PROJECT_MAINLINE)
 --     concatenating or doing arithmetic on them throws and blanks the frame.
 -- So on Forever amounts are turned into plain strings as early as possible and
 -- everything numeric (filters, merging, sorting) is unavailable.
-local ForeverInterface = tonumber(select(4, GetBuildInfo())) or 0
+-- GetBuildInfo returns its interface number as the fourth value, but on some
+-- clients it returns more values than that, so the fourth one is picked up
+-- into a name instead of being passed on to another function as extra
+-- arguments.
+local _, _, _, ForeverTOCVersion = GetBuildInfo()
+local ForeverInterface = tonumber(ForeverTOCVersion) or 0
 local IsForever = (ForeverInterface >= 16000 and ForeverInterface < 20000)
     and (type(C_CombatText) == "table")
     and (type(C_CombatText.GetCurrentEventInfo) == "function")
@@ -1445,10 +1450,18 @@ SLASH_CLASSICFCT1 = "/classicfct"
 SLASH_CLASSICFCT2 = "/cfct"
 
 local function ReportCapabilities()
-    local interface = tonumber(select(4, GetBuildInfo())) or 0
+    -- Every value this client returns, not just the ones that are documented:
+    -- it hands out more than four, and which one is the interface number is
+    -- exactly what has to be confirmed on a client nobody can test for.
+    local build = { GetBuildInfo() }
+    local reported = {}
+    for i = 1, #build do
+        reported[i] = tostring(build[i])
+    end
     local lines = {
         "ClassicFCT - client capabilities",
-        "  interface      : "..tostring(interface).." ("..tostring(select(2, GetBuildInfo()))..")",
+        "  GetBuildInfo   : "..table.concat(reported, " | "),
+        "  interface      : "..tostring(ForeverInterface),
         "  flavor mode    : "..(IsForever and "WoW: Forever (C_CombatText)" or "combat log (COMBAT_LOG_EVENT_UNFILTERED)"),
         "  C_CombatText   : "..tostring(type(C_CombatText)),
         "  issecretvalue  : "..tostring(type(issecretvalue)),
