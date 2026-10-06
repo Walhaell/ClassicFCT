@@ -165,6 +165,21 @@ local function ForeverText(value, prefix)
     return nil, prefix.."%s", value
 end
 
+-- Misses and reductions only carry a message type on this client. The client
+-- localizes them into COMBAT_TEXT_* strings; the table is the English fallback.
+local FOREVER_MISS_LABEL = {
+    MISS = "MISS", DODGE = "DODGE", PARRY = "PARRY", EVADE = "EVADE",
+    IMMUNE = "IMMUNE", DEFLECT = "DEFLECT", REFLECT = "REFLECT", MISFIRE = "MISFIRE"
+}
+
+local function ForeverMissText(messageType)
+    return _G["COMBAT_TEXT_"..messageType] or FOREVER_MISS_LABEL[messageType] or messageType
+end
+
+local function ForeverReductionText(reductionType)
+    return _G["COMBAT_TEXT_"..reductionType] or reductionType
+end
+
 -- WoW: Forever only: measured in place of the real text, whose width cannot be
 -- read (see InitFont). Five characters is a typical amount at this difficulty:
 -- "1,200" with separators, "-1.2K" abbreviated.
@@ -1088,10 +1103,6 @@ local FOREVER_MISS_TYPE = {
     MISS = true, DODGE = true, PARRY = true, EVADE = true, IMMUNE = true,
     DEFLECT = true, REFLECT = true, MISFIRE = true
 }
-local FOREVER_MISS_LABEL = {
-    MISS = "MISS", DODGE = "DODGE", PARRY = "PARRY", EVADE = "EVADE",
-    IMMUNE = "IMMUNE", DEFLECT = "DEFLECT", REFLECT = "REFLECT", MISFIRE = "MISFIRE"
-}
 local FOREVER_REDUCTION_TYPE = {
     BLOCK = "BLOCK", SPELL_BLOCK = "BLOCK",
     ABSORB = "ABSORB", SPELL_ABSORB = "ABSORB",
@@ -1108,14 +1119,6 @@ local FOREVER_HEAL_TYPE = {
     HEAL = "heal", HEAL_CRIT = "heal", HEAL_ABSORB = "heal", HEAL_CRIT_ABSORB = "heal",
     PERIODIC_HEAL = "healtick", PERIODIC_HEAL_CRIT = "healtick", PERIODIC_HEAL_ABSORB = "healtick"
 }
-
-local function ForeverMissText(messageType)
-    return _G["COMBAT_TEXT_"..messageType] or FOREVER_MISS_LABEL[messageType] or messageType
-end
-
-local function ForeverReductionText(reductionType)
-    return _G["COMBAT_TEXT_"..reductionType] or reductionType
-end
 
 local foreverUnit = "player"
 local function ForeverSetActiveUnit()
