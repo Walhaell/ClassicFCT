@@ -210,121 +210,6 @@ local function TraceEvent(messageType, data, arg3, arg4)
     end
 end
 
--- WoW: Forever: the combat log is closed to addons as a set of globals, but the
--- system behind it is still there under its namespace: the unfiltered event
--- fires and GetCurrentEventInfo hands out the same payload. Only the spelling
--- changed, which is why the classic path is used here instead of the client's
--- own combat text event whenever it answers.
-local function TraceCLEUEvent(cleuEvent, sourceFlags, destFlags, spellid, amount, crit)
-    if (not foreverTrace) then return end
-    local function slot(v)
-        if (IsNil(v)) then return "nil" end
-        if (IsSecret(v)) then return "secret "..type(v) end
-        return "value "..type(v)
-    end
-    CFCT:Log("cleu "..tostring(cleuEvent).." | srcFlags: "..slot(sourceFlags).." destFlags: "..slot(destFlags)
-        .." | spellid: "..slot(spellid).." amount: "..slot(amount).." crit: "..slot(crit))
-    foreverTraceLeft = foreverTraceLeft - 1
-    if (foreverTraceLeft <= 0) then
-        foreverTrace = false
-        CFCT:Log("cleu trace limit of "..FOREVER_TRACE_LIMIT.." events reached, tracing off")
-    end
-end
-
--- Actor flags. The COMBATLOG_OBJECT_* globals are not exported by this client,
--- and neither is bitband, so the two bits that matter are spelled out here and
--- tested with plain arithmetic on the flags, which are plain numbers.
-local CLEU_TYPE_COMBATPET = 0x4
-local CLEU_TYPE_GUARDIAN = 0x8
-local CLEU_AFFILIATION_MINE = 0x40
-local CLEU_CONTROLLED_BY_MINE = 0x400
--- A swing has no school of its own; the physical mask is a constant that this
--- client does not export either, so it is read once and defaulted.
-local CLEU_SCHOOL_PHYSICAL = _G.SCHOOL_MASK_PHYSICAL or 1
-
--- Returns whether the bit is set, or nil when the flags cannot be read at all.
-local function FlagSet(flags, mask)
-    if (IsSecret(flags) or (type(flags) ~= "number")) then return nil end
-    return (floor(flags / mask) % 2) == 1
-end
-
--- The identity of a unit is a secret value on this client, so who cast a spell
--- and who received it comes from the actor flags. The player's own GUID cannot
--- be compared against anything, so it is never used here.
-local function ForeverOwnership(sourceFlags)
-    local mine = FlagSet(sourceFlags, CLEU_AFFILIATION_MINE)
-    if (mine == nil) then
-        -- Nothing to go on: treat it as the player's own event rather than
-        -- dropping the player's damage.
-        return true, false
-    end
-    if (not mine) then
-        local controlled = FlagSet(sourceFlags, CLEU_CONTROLLED_BY_MINE)
-        if (not controlled) then return false, false end
-    end
-    local pet = FlagSet(sourceFlags, CLEU_TYPE_COMBATPET) or FlagSet(sourceFlags, CLEU_TYPE_GUARDIAN)
-    return true, (pet == true)
-end
-
--- Booleans and strings out of an event are only usable when the client did not
--- protect them; what cannot be read is reported as absent.
-local function ForeverBool(v)
-    if (IsSecret(v)) then return false end
-    return v and true or false
-end
-local function ForeverString(v)
-    if (IsSecret(v) or (type(v) ~= "string")) then return nil end
-    return v
-end
--- Numbers that end up as table keys, such as the damage school in the color
--- tables, have to be plain or the lookup is not allowed.
-local function ForeverKey(v)
-    if (IsSecret(v) or (type(v) ~= "number")) then return nil end
-    return v
-end
-
-local foreverCLEUReader, foreverCLEUSeen, foreverCLEUName, foreverCLEUError, foreverCLEUEmpty = nil, false, "none chosen", nil, false
--- "auto" prefers the combat log as soon as it answers and falls back to the
--- client's combat text event, "cleu" and "text" pick one by hand.
-local foreverSource = "auto"
--- What the client's combat log handed over for the fields the layout needs. They
--- are plain or secret, and that decides whether the spell, the damage type and
--- the crit style can be used on that client.
-local foreverSpellIdKind, foreverSchoolKind, foreverCritKind = "unknown", "unknown", "unknown"
-CFCT.ForeverSupport = { spellId = foreverSpellIdKind, school = foreverSchoolKind, crit = foreverCritKind }
--- The reader to use, tried in order. Which of them exists is not something the
--- API documentation can answer: the namespaces that hold the payload are absent
--- from the documentation, and the deprecated global is gone on this client.
-local function ForeverPickReader()
-    if (C_CombatLogInternal and C_CombatLogInternal.GetCurrentEventInfo) then
-        foreverCLEUReader, foreverCLEUName = C_CombatLogInternal.GetCurrentEventInfo, "C_CombatLogInternal"
-    elseif (C_CombatLogSecure and C_CombatLogSecure.GetCurrentEventInfo) then
-        foreverCLEUReader, foreverCLEUName = C_CombatLogSecure.GetCurrentEventInfo, "C_CombatLogSecure"
-    elseif (C_CombatLog and C_CombatLog.GetCurrentEventInfo) then
-        foreverCLEUReader, foreverCLEUName = C_CombatLog.GetCurrentEventInfo, "C_CombatLog"
-    elseif (CombatLogGetCurrentEventInfo) then
-        foreverCLEUReader, foreverCLEUName = CombatLogGetCurrentEventInfo, "CombatLogGetCurrentEventInfo"
-    else
-        foreverCLEUReader, foreverCLEUName = nil, "none available"
-    end
-    return foreverCLEUReader
-end
--- /cfct cleu lets a client that answers on another reader be used without a
--- restart, which is the only way to find out on a build nobody can test for.
-local function ForeverSetReader(name)
-    local names = {
-        internal = C_CombatLogInternal and C_CombatLogInternal.GetCurrentEventInfo,
-        secure = C_CombatLogSecure and C_CombatLogSecure.GetCurrentEventInfo,
-        namespace = C_CombatLog and C_CombatLog.GetCurrentEventInfo,
-        global = CombatLogGetCurrentEventInfo,
-    }
-    local reader = names[strlower(name or "")]
-    if (not reader) then return false end
-    foreverCLEUReader, foreverCLEUName = reader, strlower(name)
-    foreverCLEUSeen, foreverCLEUError, foreverCLEUEmpty = false, nil, false
-    return true
-end
-
 -- WoW: Forever only: measured in place of the real text, whose width cannot be
 -- read (see InitFont). Five characters is a typical amount at this difficulty:
 -- "1,200" with separators, "-1.2K" abbreviated.
@@ -958,23 +843,10 @@ local function DispatchText(guid, event, text, amount, spellid, spellicon, perio
     if (IsForever) then
         -- Every feature in the block below needs to compare or add up amounts,
         -- and amounts are secret values on WoW: Forever: no rolling average, no
-        -- thresholds. The amount arrives either as a ready made string or as a
-        -- format pattern plus the secret value.
-        if (not textFmt) then
-            if (not text) then
-                if (IsSecret(amount)) then
-                    local sign = (event == "heal" or event == "healtick") and "+" or "-"
-                    text, textFmt, secretValue = ForeverText(amount, sign)
-                else
-                    text = CFCT:FormatAmount(amount) or ""
-                end
-            end
-            if (textFmt and spellicon and catConfig.showIcons) then
-                -- The amount stays with the client, so the icon goes into the
-                -- pattern instead of in front of the text. Plain text is left
-                -- alone, the icon is added to it further down.
-                textFmt = spellicon..textFmt
-            end
+        -- thresholds, no abbreviating here. The amount arrives either as a
+        -- ready made string or as a format pattern plus the secret value.
+        if (not text) and (not textFmt) then
+            text = CFCT:FormatAmount(amount) or ""
         end
     else
         text = text or tostring(amount)
@@ -1097,10 +969,10 @@ local function CacheEvent(guid, event, amount, text, spellid, spellicon, periodi
 end
 
 local function ProcessCachedEvents()
-    -- Merging adds amounts together and compares them, which a secret value on
-    -- WoW: Forever does not allow. The cache itself is only filled by the combat
-    -- log, so it still has to be drained there, one event at a time.
-    local mergingEnabled = CFCT.Config.mergeEvents and (not IsForever)
+    -- The cache is only filled by the combat log handler, which WoW: Forever
+    -- does not have. Its records hold secret amounts, so it is left alone.
+    if (IsForever) then return end
+    local mergingEnabled = CFCT.Config.mergeEvents
     local separateMisses = CFCT.Config.mergeEventsMisses
 
     for id,record in pairs(eventCache) do
@@ -1200,8 +1072,8 @@ local function checkCvars()
         -- The old floatingCombatTextCombatDamage/CombatHealing cvars are gone
         -- on this client, so their frame is what the option acts on. It is kept
         -- shown and only made transparent: while it is hidden the client stops
-        -- sending the player's own hits to the combat text event, which is the
-        -- fallback source here. A few invisible FontStrings cost nothing.
+        -- reporting the player's own hits, which is the only event source here.
+        -- A few invisible FontStrings cost nothing.
         local blizzFrame = _G.CombatText
         if (blizzFrame) then
             local wantHidden = CFCT.hideBlizz and true or false
@@ -1313,11 +1185,6 @@ function f:COMBAT_TEXT_UPDATE(messageType)
     if (not messageType) then return end
     local data, arg3, arg4 = C_CombatText.GetCurrentEventInfo()
     if (foreverTrace) then TraceEvent(messageType, data, arg3, arg4) end
-    -- The combat log carries the spell behind a hit and keeps answering when
-    -- the client's own text is hidden, so this event is only used while the log
-    -- is silent or when it is asked for by hand.
-    if (foreverSource == "cleu") then return end
-    if ((foreverSource == "auto") and foreverCLEUSeen) then return end
     local isSpell = (strsub(messageType, 1, 6) == "SPELL_")
     local typeName = isSpell and strsub(messageType, 7) or messageType
 
@@ -1377,7 +1244,6 @@ end
 local events
 if (IsForever) then
     events = {
-        COMBAT_LOG_EVENT_UNFILTERED = true,
         COMBAT_TEXT_UPDATE = true,
         UNIT_ENTERED_VEHICLE = true,
         UNIT_EXITING_VEHICLE = true,
@@ -1584,140 +1450,6 @@ local CLEU_HEALING_EVENT = {
     SPELL_PERIODIC_HEAL = true,
 }
 
--- WoW: Forever: the combat log path is the one worth using there. It is the
--- only source that carries the spell behind a hit, which is what the icons
--- need, and it does not stop when the client's own text is hidden. Only the
--- amounts stay secret, which is handled further down in DispatchText.
--- An icon is a texture path built in Lua, so a spell id that the client kept
--- secret cannot be used: it has to be a plain number. GetSpellTexture exists
--- as a global here while GetSpellInfo does not.
-local function ForeverSpellIconText(spellid)
-    if (IsSecret(spellid) or (type(spellid) ~= "number")) then return nil end
-    local fctConfig = CFCT.Config
-    local tx = iconCache[spellid]
-    if (not tx) then
-        local getTexture = GetSpellTexture or (C_Spell and C_Spell.GetSpellTexture)
-        if (not getTexture) then return nil end
-        local ok, texture = pcall(getTexture, spellid)
-        if ((not ok) or IsNil(texture) or (type(texture) ~= "string")) then return nil end
-        tx = texture
-        iconCache[spellid] = tx
-    end
-    local aspectRatio = fctConfig.spellIconAspectRatio
-    local zoom = fctConfig.spellIconZoom
-    local offsetX, offsetY = fctConfig.spellIconOffsetX, fctConfig.spellIconOffsetY
-    local height, width = 12 / aspectRatio, 12
-    local txSize = zoom * 100
-    local txMinX = (zoom - 1) * 100 / 2
-    local txMaxX = (zoom + 1) * 100 / 2
-    local txMinY = (zoom - (1 / aspectRatio)) * 100 / 2
-    local txMaxY = (zoom + (1 / aspectRatio)) * 100 / 2
-    return format("|T%s:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d|t",
-        tx, height, width, offsetX, offsetY, txSize, txSize, txMinX, txMaxX, txMinY, txMaxY)
-end
-
--- 75 = autoshot, 6603 = auto attack. Anything the client kept secret is treated
--- as a real spell, which only costs the auto attack style.
-local function ForeverSpellCategory(spellid)
-    if (IsSecret(spellid) or (type(spellid) ~= "number")) then return "spell" end
-    return ((spellid == 75) or (spellid == 6603)) and "auto" or "spell"
-end
-
-local function ForeverPeriodic(cleuEvent)
-    return strfind(cleuEvent, "SPELL_PERIODIC", 1, true) ~= nil
-end
-
-local function ForeverCLEUDispatch(event, spellid, amount, text, periodic, crit, miss, pet, school)
-    if (CFCT.enabled == false) then return end
-    local fctConfig = CFCT.Config
-    if (miss and fctConfig.filterMissesEnabled) then return end
-    -- A plain spell id is worth remembering: it fills the blacklist and the two
-    -- spell id lists in the options.
-    if ((not IsSecret(spellid)) and (type(spellid) == "number") and (not spellIdCache[spellid])) then
-        spellIdCache[spellid] = true
-        if CFCT.ConfigPanel:IsVisible() then CFCT.ConfigPanel:refresh() end
-    end
-    if ((not IsSecret(spellid)) and fctConfig.filterSpellBlacklist[spellid] == true) then return end
-    DispatchText(nil, event, text, amount, spellid, ForeverSpellIconText(spellid) or "", periodic, crit, miss, pet, ForeverKey(school))
-end
-
-local function ForeverCombatLogEvent()
-    local reader = foreverCLEUReader or ForeverPickReader()
-    if (not reader) then return end
-    -- Read through pcall: a reader that is not the one this event belongs to can
-    -- refuse the call, and a table keeps every value of the payload when it
-    -- works, which a pcall would not.
-    local ok, payload = pcall(reader)
-    if (not ok) then
-        if (not foreverCLEUError) then
-            foreverCLEUError = tostring(payload)
-            CFCT:Log("The combat log reader "..foreverCLEUName.." would not hand out the event: "..foreverCLEUError)
-            CFCT:Log("Try /cfct cleu internal|secure|namespace|global and then /cfct trace.")
-        end
-        return
-    end
-    -- A reader that hands out nothing is simply not the one this event belongs
-    -- to. Noted once, because it is what decides whether the addon has a source.
-    if (not payload) then
-        if (not foreverCLEUEmpty) then
-            foreverCLEUEmpty = true
-            CFCT:Log("The combat log reader "..foreverCLEUName.." hands out no event. Try /cfct cleu with another reader.")
-        end
-        return
-    end
-    -- 1 timestamp, 2 subevent, 3 hideCaster, 4/5/6 source GUID, name and flags,
-    -- 8/9/10 destination GUID, name and flags, 12 onwards the event itself.
-    local cleuEvent = ForeverString(payload[2])
-    if (not cleuEvent) then return end
-    if (foreverSource == "text") then return end
-    local sourceFlags, destFlags = payload[6], payload[10]
-    local arg12, arg14, arg15, arg18 = payload[12], payload[14], payload[15], payload[18]
-    local mine, pet = ForeverOwnership(sourceFlags)
-    if (foreverTrace) then
-        TraceCLEUEvent(cleuEvent, sourceFlags, destFlags, arg12, arg15, arg18)
-    end
-    if (not mine) then return end
-    -- Damage taken belongs to the client, as on the other flavours.
-    if (FlagSet(destFlags, CLEU_AFFILIATION_MINE) == true) then return end
-    foreverCLEUSeen = true
-    local isSwing = CLEU_SWING_EVENT[cleuEvent] and true or false
-    if ((not isSwing) and (foreverSpellIdKind == "unknown")) then
-        -- What the log handed over, once, so /cfct diag can report it and the
-        -- options can show the icon and damage type settings that work here.
-        -- A swing has no spell id, so only spell events can answer this.
-        foreverSpellIdKind = IsSecret(arg12) and "secret" or ((type(arg12) == "number") and "plain number" or "nothing")
-        foreverSchoolKind = IsSecret(arg14) and "secret" or ((type(arg14) == "number") and "plain number" or "nothing")
-        foreverCritKind = IsSecret(arg18) and "secret" or "plain"
-        CFCT.ForeverSupport = { spellId = foreverSpellIdKind, school = foreverSchoolKind, crit = foreverCritKind }
-    end
-    if (CLEU_DAMAGE_EVENT[cleuEvent]) then
-        if (isSwing) then
-            -- amount, overkill, school, resist, block, absorb, crit, glancing, crushing, offhand
-            ForeverCLEUDispatch("auto", nil, arg12, nil, nil, ForeverBool(arg18), false, pet, arg14)
-        else
-            -- spellid, spellname, school, amount, overkill, school, resist, block, absorb, crit, ...
-            ForeverCLEUDispatch(ForeverSpellCategory(arg12), arg12, arg15, nil, ForeverPeriodic(cleuEvent), ForeverBool(arg18), false, pet, arg14)
-        end
-    elseif (CLEU_MISS_EVENT[cleuEvent]) then
-        if (isSwing) then
-            -- misstype, absorbed, amount
-            ForeverCLEUDispatch("auto", nil, nil, ForeverMissText(ForeverString(arg12) or "MISS"), nil, false, true, pet, CLEU_SCHOOL_PHYSICAL)
-        else
-            -- spellid, spellname, school, misstype, absorbed, amount
-            ForeverCLEUDispatch(ForeverSpellCategory(arg12), arg12, nil, ForeverMissText(ForeverString(arg15) or "MISS"),
-                ForeverPeriodic(cleuEvent), false, true, pet, arg14)
-        end
-    elseif (CLEU_HEALING_EVENT[cleuEvent]) then
-        if (isSwing) then
-            -- amount, overheal, absorb, crit
-            ForeverCLEUDispatch("heal", nil, arg12, nil, nil, ForeverBool(arg15), false, pet, nil)
-        else
-            -- spellid, spellname, school, amount, overheal, absorb, crit
-            ForeverCLEUDispatch("heal", arg12, arg15, nil, ForeverPeriodic(cleuEvent), ForeverBool(arg18), false, pet, arg14)
-        end
-    end
-end
-
 
 -- local MISS_EVENT_STRINGS = {
 --     ["ABSORB"] = "Absorbed",
@@ -1733,10 +1465,6 @@ end
 -- }
 
 function f:COMBAT_LOG_EVENT_UNFILTERED()
-    if (IsForever) then
-        ForeverCombatLogEvent()
-        return
-    end
     if CFCT.enabled == false then return end
     local timestamp, cleuEvent, hideCaster, sourceGUID, sourceName, sourceFlags, sourceRaidFlags, destGUID, destName, destFlags, destRaidFlags, arg12, arg13, arg14, arg15, arg16, arg17, arg18, arg19, arg20, arg21, arg22, arg23, arg24, arg25 = CombatLogGetCurrentEventInfo()
     local playerEvent, petEvent = (playerGUID == sourceGUID), false
@@ -1859,15 +1587,6 @@ local function ReportCapabilities()
         probe:SetParent(nil)
         scratch:Hide()
         table.insert(lines, "  active unit    : "..ForeverActiveUnit().." (asked for "..foreverUnit..")")
-        table.insert(lines, "  source         : "..foreverSource..(foreverCLEUSeen and " (combat log answering)" or " (combat text fallback)"))
-        table.insert(lines, "  cleu reader    : "..foreverCLEUName)
-        if (foreverCLEUError) then
-            table.insert(lines, "  cleu reader err: "..foreverCLEUError)
-        end
-        table.insert(lines, "  cleu events    : "..(foreverCLEUSeen and "seen" or "none seen yet"))
-        table.insert(lines, "  cleu spellid   : "..foreverSpellIdKind)
-        table.insert(lines, "  cleu school    : "..foreverSchoolKind)
-        table.insert(lines, "  cleu crit      : "..foreverCritKind)
     end
     return table.concat(lines, "\n")
 end
@@ -1885,7 +1604,7 @@ SlashCmdList["CLASSICFCT"] = function(msg)
         end
         foreverTrace = not foreverTrace
         foreverTraceLeft = FOREVER_TRACE_LIMIT
-        CFCT:Log("Combat event trace "..(foreverTrace and ("on, up to "..FOREVER_TRACE_LIMIT.." events, combat text and combat log") or "off"))
+        CFCT:Log("Combat text event trace "..(foreverTrace and ("on, up to "..FOREVER_TRACE_LIMIT.." events") or "off"))
     elseif (cmd == "unit") then
         if (not IsForever) then
             CFCT:Log("The watched unit is a WoW: Forever setting; other clients follow the combat log.")
@@ -1896,33 +1615,11 @@ SlashCmdList["CLASSICFCT"] = function(msg)
         if (rest ~= "") then foreverUnit = rest end
         ForeverSetActiveUnit()
         CFCT:Log("Watching unit "..ForeverActiveUnit()..". Try /cfct unit target to see what that reports.")
-    elseif (cmd == "source") then
-        if (not IsForever) then
-            CFCT:Log("The source is a WoW: Forever setting; other clients always read the combat log.")
-            return
-        end
-        local wanted = strlower(rest or "auto")
-        if (wanted ~= "auto" and wanted ~= "cleu" and wanted ~= "text") then
-            CFCT:Log("Source is "..foreverSource..". Use /cfct source auto|cleu|text")
-            return
-        end
-        foreverSource = wanted
-        CFCT:Log("Source set to "..foreverSource..(foreverCLEUSeen and " (the combat log is answering)" or ""))
-    elseif (cmd == "cleu") then
-        if (not IsForever) then
-            CFCT:Log("Only WoW: Forever needs a combat log reader; other clients use the classic global.")
-            return
-        end
-        if (ForeverSetReader(rest)) then
-            CFCT:Log("Combat log reader set to "..foreverCLEUName..". Run /cfct trace and hit something.")
-        else
-            CFCT:Log("No such reader. Use /cfct cleu internal|secure|namespace|global")
-        end
     elseif (cmd == "reload") then
         CFCT:Log("Reloading ClassicFCT...")
         C_Timer.After(1, function() ReloadUI() end)
     else
-        CFCT:Log("Commands: /cfct diag, /cfct trace, /cfct source <auto|cleu|text>, /cfct cleu <reader>, /cfct unit <token>, /cfct reload")
+        CFCT:Log("Commands: /cfct diag, /cfct trace, /cfct unit <token>, /cfct reload")
     end
 end
 
